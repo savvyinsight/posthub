@@ -478,6 +478,67 @@ Both rate limits AND concurrency limits are needed.
 
 ---
 
+## Known Limitations
+
+### Fixed Window Burst Problem
+
+Fixed windows allow edge bursts:
+
+```
+10 requests at 12:59
+10 requests at 1:00
+= 20 requests in seconds
+```
+
+Acceptable for MVP.
+
+Known limitation.
+
+Token bucket would smooth this.
+
+### Re-enqueue Task Identity
+
+Current re-enqueue implementation:
+
+```go
+client.EnqueueContext(ctx, t, asynq.ProcessIn(delay))
+```
+
+May duplicate task identity semantics depending on Asynq behavior.
+
+Potential issues:
+
+- duplicate processing
+- lost metadata
+- retry inconsistencies
+
+Safer alternatives:
+
+- return retryable error with custom delay
+- create explicit retry task payload
+
+Investigate Asynq behavior before implementation.
+
+### Single Worker Instance Assumption
+
+Current concurrency control:
+
+```go
+type PlatformConcurrencyLimiter struct {
+    semaphores map[string]chan struct{}
+}
+```
+
+This is NOT cluster-safe.
+
+Works only within single process.
+
+Multiple worker instances need distributed coordination.
+
+Document: single-worker-instance assumption for MVP.
+
+---
+
 ## Non-Goals For MVP
 
 Not included:

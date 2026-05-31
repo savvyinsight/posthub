@@ -518,6 +518,79 @@ auth:
 
 ---
 
+## Known Limitations
+
+### AuthProvider Interface Mixing Concerns
+
+Current interface mixes:
+
+- credential retrieval (Authenticate)
+- refresh lifecycle (Refresh)
+- validation logic (Validate)
+- state inspection (IsExpired)
+
+This assumes all auth systems behave similarly.
+
+They do not.
+
+Future refactor:
+
+```go
+type CredentialProvider interface {
+    GetCredentials(ctx context.Context) (*Credentials, error)
+}
+
+type CredentialRefresher interface {
+    Refresh(ctx context.Context) error
+}
+
+type CredentialValidator interface {
+    Validate(ctx context.Context) error
+}
+```
+
+Acceptable for MVP.
+
+Document as future refactor point.
+
+### Credential Encryption Format
+
+Current: AES-256-GCM
+
+Missing operational details:
+
+- key version column
+- nonce storage format
+- envelope structure
+
+Recommended format:
+
+```
+version:nonce:ciphertext
+```
+
+Store version for key rotation support.
+
+### Auth Failure Recovery
+
+Current: error classification exists.
+
+Missing: operational flow.
+
+Need explicit handling:
+
+```
+publish fails
+→ auth invalid
+→ mark account unhealthy
+→ stop retries
+→ require reconnect
+```
+
+Without this: workers may endlessly retry invalid accounts.
+
+---
+
 ## Non-Goals For MVP
 
 Not included:

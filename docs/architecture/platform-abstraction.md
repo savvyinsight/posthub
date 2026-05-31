@@ -46,13 +46,16 @@ type Platform interface {
     // Delete removes published content from the platform
     Delete(ctx context.Context, postID string, creds *auth.Credentials) error
 
-    // RefreshAuth refreshes authentication credentials
-    RefreshAuth(ctx context.Context) error
-
     // Capabilities returns platform capabilities
     Capabilities() Capabilities
 }
 ```
+
+Note: RefreshAuth is NOT in Platform interface.
+
+Auth lifecycle belongs to AuthProvider, not Platform.
+
+Platform receives credentials, does not own them.
 
 ---
 
@@ -195,10 +198,6 @@ func (a *Adapter) Publish(ctx context.Context, doc *transform.Document, creds *a
 
 func (a *Adapter) Delete(ctx context.Context, postID string, creds *auth.Credentials) error {
     return a.deletePost(ctx, postID, creds)
-}
-
-func (a *Adapter) RefreshAuth(ctx context.Context) error {
-    return a.auth.Refresh(ctx)
 }
 
 func (a *Adapter) Capabilities() platform.Capabilities {
