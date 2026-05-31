@@ -23,8 +23,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"github.com/savvyinsight/posthub/internal/api"
 	"github.com/savvyinsight/posthub/internal/config"
 	"github.com/savvyinsight/posthub/internal/logger"
+	"github.com/savvyinsight/posthub/internal/queue"
+	"github.com/savvyinsight/posthub/internal/storage"
+	"github.com/savvyinsight/posthub/internal/web"
 )
 
 func main() {
@@ -43,8 +47,21 @@ func main() {
 		zap.String("environment", cfg.Environment),
 	)
 
-	// Build router
-	r := buildRouter(log)
+	// Initialize storage (in-memory for MVP).
+	ms := storage.NewMemoryStorage()
+
+	// Initialize queue enqueuer.
+	// Use a no-op enqueuer when Redis is not configured.
+	var enqueuer queue.Enqueuer = &noOpEnqueuer{log: log}
+
+	// Build router with handlers.
+	hh := &api.HealthHandler{Version: "0.1.0"}
+	ph := &api.PublishHandler{
+		ContentStore: ms.Content,
+		TaskStore:    ms.Tasks,
+		Enqueuer:     enqueuer,
+	}
+	r := buildRouter(log, hh, ph)
 
 	// Create server
 	srv := &http.Server{
@@ -89,68 +106,46 @@ func main() {
 }
 
 // buildRouter creates the HTTP router with all routes and middleware.
-func buildRouter(log *logger.Logger) *chi.Mux {
+func buildRouter(log *logger.Logger, hh *api.HealthHandler, ph *api.PublishHandler) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Middleware
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(LoggerMiddleware(log))
+	r.Use(api.RequestLoggerMiddleware(log))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	// Health check
-	r.Get("/health", handleHealth)
+	// Health check (JSON)
+	r.Get("/api/health", hh.HandleHealth)
 
-	// API v1 routes (stubs — handlers will be added when business logic is implemented)
+	// Web UI
+	wh := web.NewHandler(ph.ContentStore, ph.TaskStore)
+	wh.Routes(r)
+
+	// API v1 routes
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(middleware.SetHeader("Content-Type", "application/json"))
 
-		// Content endpoints
-		// r.Post("/content", contentHandler.Create)
-		// r.Get("/content", contentHandler.List)
-		// r.Get("/content/{id}", contentHandler.Get)
-		// r.Put("/content/{id}", contentHandler.Update)
-		// r.Delete("/content/{id}", contentHandler.Delete)
-
 		// Publishing endpoints
-		// r.Post("/content/{id}/publish", publishHandler.Publish)
-		// r.Get("/content/{id}/jobs", publishHandler.ListJobs)
-		// r.Get("/jobs/{id}", publishHandler.GetJob)
+		r.Post("/publish", ph.HandlePublish)
+		r.Get("/publish/{id}", ph.HandlePublishStatus)
 	})
 
 	return r
 }
 
-// handleHealth returns a health check response.
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"status":"ok","service":"posthub"}`)
+// noOpEnqueuer is a queue.Enqueueuer that logs but does not enqueue.
+// Used when Redis is not available (MVP / local dev without Redis).
+type noOpEnqueuer struct {
+	log *logger.Logger
 }
 
-// LoggerMiddleware returns middleware that logs each request with structured fields.
-func LoggerMiddleware(log *logger.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-
-			// Store logger with request_id in context for downstream handlers
-			ctx := logger.WithRequestID(r.Context(), middleware.GetReqID(r.Context()))
-			r = r.WithContext(ctx)
-
-			defer func() {
-				log.Info("request completed",
-					zap.String("method", r.Method),
-					zap.String("path", r.URL.Path),
-					zap.Int("status", ww.Status()),
-					zap.Int("bytes", ww.BytesWritten()),
-					zap.Int64("duration_ms", time.Since(start).Milliseconds()),
-					zap.String("request_id", middleware.GetReqID(r.Context())),
-				)
-			}()
-
-			next.ServeHTTP(ww, r)
-		})
-	}
+func (n *noOpEnqueuer) EnqueuePublish(_ context.Context, payload queue.PublishPayload, _ queue.EnqueueOptions) error {
+	n.log.Warn("no-op enqueuer: task not enqueued (Redis not configured)",
+		zap.String("task_id", payload.TaskID),
+		zap.String("content_id", payload.ContentID),
+		zap.String("platform", payload.Platform),
+	)
+	return nil
 }
