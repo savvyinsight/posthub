@@ -1,7 +1,7 @@
 // Package main is the entry point for the posthub API server.
 //
 // It starts an HTTP server that serves the REST API for content management
-// and publish orchestration. The server uses chi for routing and slog
+// and publish orchestration. The server uses chi for routing and zap
 // for structured logging.
 //
 // Usage:
@@ -13,7 +13,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"go.uber.org/zap"
 
 	"github.com/savvyinsight/posthub/internal/config"
 	"github.com/savvyinsight/posthub/internal/logger"
@@ -36,12 +36,11 @@ func main() {
 	}
 
 	// Initialize logger
-	log := logger.New(cfg.LogLevel, cfg.Environment)
-	slog.SetDefault(log)
+	log := logger.New(cfg.Logging.Level, cfg.Environment)
 
 	log.Info("starting posthub api",
-		"port", cfg.APIPort,
-		"environment", cfg.Environment,
+		zap.Int("port", cfg.API.Port),
+		zap.String("environment", cfg.Environment),
 	)
 
 	// Build router
@@ -49,17 +48,17 @@ func main() {
 
 	// Create server
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.APIPort),
+		Addr:         fmt.Sprintf(":%d", cfg.API.Port),
 		Handler:      r,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  cfg.API.ReadTimeout,
+		WriteTimeout: cfg.API.WriteTimeout,
+		IdleTimeout:  cfg.API.IdleTimeout,
 	}
 
 	// Start server in goroutine
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("api server listening", "addr", srv.Addr)
+		log.Info("api server listening", zap.String("addr", srv.Addr))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
@@ -71,9 +70,9 @@ func main() {
 
 	select {
 	case sig := <-quit:
-		log.Info("shutdown signal received", "signal", sig)
+		log.Info("shutdown signal received", zap.String("signal", sig.String()))
 	case err := <-errCh:
-		log.Error("server error", "error", err)
+		log.Error("server error", zap.Error(err))
 	}
 
 	// Graceful shutdown
@@ -81,15 +80,16 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Error("shutdown error", "error", err)
+		log.Error("shutdown error", zap.Error(err))
 		os.Exit(1)
 	}
 
+	_ = log.Sync()
 	log.Info("api server stopped")
 }
 
 // buildRouter creates the HTTP router with all routes and middleware.
-func buildRouter(log *slog.Logger) *chi.Mux {
+func buildRouter(log *logger.Logger) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Middleware
@@ -128,21 +128,25 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"status":"ok","service":"posthub"}`)
 }
 
-// LoggerMiddleware returns middleware that logs each request.
-func LoggerMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
+// LoggerMiddleware returns middleware that logs each request with structured fields.
+func LoggerMiddleware(log *logger.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
+			// Store logger with request_id in context for downstream handlers
+			ctx := logger.WithRequestID(r.Context(), middleware.GetReqID(r.Context()))
+			r = r.WithContext(ctx)
+
 			defer func() {
 				log.Info("request completed",
-					"method", r.Method,
-					"path", r.URL.Path,
-					"status", ww.Status(),
-					"bytes", ww.BytesWritten(),
-					"duration_ms", time.Since(start).Milliseconds(),
-					"request_id", middleware.GetReqID(r.Context()),
+					zap.String("method", r.Method),
+					zap.String("path", r.URL.Path),
+					zap.Int("status", ww.Status()),
+					zap.Int("bytes", ww.BytesWritten()),
+					zap.Int64("duration_ms", time.Since(start).Milliseconds()),
+					zap.String("request_id", middleware.GetReqID(r.Context())),
 				)
 			}()
 

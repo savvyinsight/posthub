@@ -14,10 +14,11 @@ package main
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"go.uber.org/zap"
 
 	"github.com/savvyinsight/posthub/internal/config"
 	"github.com/savvyinsight/posthub/internal/logger"
@@ -32,25 +33,24 @@ func main() {
 	}
 
 	// Initialize logger
-	log := logger.New(cfg.LogLevel, cfg.Environment)
-	slog.SetDefault(log)
+	log := logger.New(cfg.Logging.Level, cfg.Environment)
 
 	log.Info("starting posthub worker",
-		"concurrency", cfg.WorkerConcurrency,
-		"environment", cfg.Environment,
+		zap.Int("concurrency", cfg.Queue.Concurrency),
+		zap.String("environment", cfg.Environment),
 	)
 
 	// TODO: Initialize Asynq server when queue layer is implemented
 	// srv := asynq.NewServer(
-	//     asynq.RedisClientOpt{Addr: cfg.RedisURL},
-	//     asynq.Config{Concurrency: cfg.WorkerConcurrency},
+	//     asynq.RedisClientOpt{Addr: cfg.Redis.URL},
+	//     asynq.Config{Concurrency: cfg.Queue.Concurrency},
 	// )
 	//
 	// mux := asynq.NewServeMux()
 	// mux.HandleFunc(queue.TypePublishContent, handler.HandlePublish)
 	//
 	// if err := srv.Run(mux); err != nil {
-	//     log.Error("worker error", "error", err)
+	//     log.Error("worker error", zap.Error(err))
 	//     os.Exit(1)
 	// }
 
@@ -61,6 +61,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 
-	log.Info("shutdown signal received", "signal", sig)
+	log.Info("shutdown signal received", zap.String("signal", sig.String()))
+	_ = log.Sync()
 	log.Info("posthub worker stopped")
 }
