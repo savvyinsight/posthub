@@ -1,11 +1,19 @@
-// Package queue defines the task queue abstraction.
+// Package queue provides the async task queue for publish operations.
 //
-// The queue is responsible for enqueueing publish tasks and providing
-// the handler interface that workers implement. The actual Asynq
-// implementation will be added when Redis integration is built.
+// It defines the Enqueuer/Handler abstractions and their Asynq-backed
+// implementations, plus supporting types for idempotency, metrics,
+// and dead-letter inspection.
+//
+// Dependency flow: queue (Layer 1) depends on contracts and logger (Layer 0).
+// It does NOT depend on storage or platform directly; those are injected
+// via the Publisher and TaskStateStore interfaces defined here.
 package queue
 
-import "context"
+import (
+	"context"
+
+	"github.com/savvyinsight/posthub/internal/contracts"
+)
 
 // TaskType identifies the kind of task in the queue.
 const (
@@ -21,9 +29,10 @@ type PublishPayload struct {
 
 // EnqueueOptions configures how a task is enqueued.
 type EnqueueOptions struct {
-	MaxRetry int
-	Queue    string
-	Timeout  int // seconds
+	MaxRetry    int
+	Queue       string
+	Timeout     int // seconds
+	RetryPolicy *contracts.RetryPolicy // nil = use default backoff
 }
 
 // Enqueuer adds tasks to the queue.

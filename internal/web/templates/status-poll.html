@@ -1,0 +1,54 @@
+{{define "status-poll.html"}}
+<div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+     hx-get="/status/{{.ContentID}}/poll"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML">
+    <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-semibold text-gray-900">Publish Status</h3>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                     bg-yellow-100 text-yellow-800">
+            <svg class="animate-spin -ml-1 mr-1.5 h-3 w-3 text-yellow-600"
+                 xmlns="http://www.w3.org/2000/svg"
+                 fill="none"
+                 viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+            Processing
+        </span>
+    </div>
+
+    <div class="text-sm text-gray-500 mb-4">
+        Content ID: <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs">{{.ContentID}}</code>
+    </div>
+
+    <div class="space-y-3">
+        {{range .Tasks}}
+        <div class="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+            <div class="flex items-center gap-3">
+                <div class="flex-shrink-0">
+                    {{if eq .Status "pending"}}
+                    <div class="h-3 w-3 bg-gray-400 rounded-full"></div>
+                    {{else if eq .Status "processing"}}
+                    <div class="h-3 w-3 bg-blue-500 rounded-full animate-pulse"></div>
+                    {{else if eq .Status "succeeded"}}
+                    <div class="h-3 w-3 bg-green-500 rounded-full"></div>
+                    {{else if eq .Status "failed"}}
+                    <div class="h-3 w-3 bg-red-500 rounded-full"></div>
+                    {{else}}
+                    <div class="h-3 w-3 bg-gray-400 rounded-full"></div>
+                    {{end}}
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-900">{{.Platform}}</p>
+                    <p class="text-xs text-gray-500">{{.Status}}</p>
+                </div>
+            </div>
+            {{if .Error}}
+            <p class="text-xs text-red-600 max-w-xs truncate">{{.Error}}</p>
+            {{end}}
+        </div>
+        {{end}}
+    </div>
+</div>
+{{end}}
