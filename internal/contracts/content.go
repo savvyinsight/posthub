@@ -59,12 +59,17 @@ func (s ContentStatus) IsTerminal() bool {
 }
 
 // Content represents the canonical content model stored in the database.
+//
+// This is the single source of truth for content across all subsystems.
+// Tags are stored as JSONB arrays. Metadata holds flexible key-value data
+// (source, word count, custom fields) without schema changes.
 type Content struct {
-	ID        string        `json:"id"`
-	Title     string        `json:"title"`
-	Body      string        `json:"body"`
-	Tags      []string      `json:"tags"`
-	Status    ContentStatus `json:"status"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	ID        string         `json:"id"`
+	Title     string         `json:"title"`
+	Body      string         `json:"body"`
+	Tags      []string       `json:"tags"`
+	Status    ContentStatus  `json:"status"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
 }

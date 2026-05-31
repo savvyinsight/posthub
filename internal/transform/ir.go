@@ -10,7 +10,11 @@
 // platform adaptation and AI-powered transformation.
 package transform
 
-import "time"
+import "github.com/savvyinsight/posthub/internal/contracts"
+
+// Content is the canonical content type, re-exported for transform package convenience.
+// Defined in contracts — includes Status and Metadata fields.
+type Content = contracts.Content
 
 // NodeType identifies the kind of IR node.
 type NodeType string
@@ -204,14 +208,3 @@ type Renderer interface {
 	SupportedNodes() []NodeType
 }
 
-// --- Content Model (for transformation context) ---
-
-// Content represents content being transformed.
-type Content struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	Tags      []string  `json:"tags"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}

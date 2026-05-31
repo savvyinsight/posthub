@@ -58,3 +58,25 @@ func TestContentStatus_IsTerminal(t *testing.T) {
 		})
 	}
 }
+
+func TestContent_MetadataOptional(t *testing.T) {
+	c := Content{
+		ID:     "test-1",
+		Title:  "Test",
+		Body:   "body",
+		Status: ContentStatusDraft,
+	}
+
+	if c.Metadata != nil {
+		t.Errorf("Metadata should be nil when not set, got %v", c.Metadata)
+	}
+
+	c.Metadata = map[string]any{
+		"source":     "web",
+		"word_count": 1500,
+	}
+
+	if c.Metadata["source"] != "web" {
+		t.Errorf("Metadata[source] = %v, want web", c.Metadata["source"])
+	}
+}
