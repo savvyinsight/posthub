@@ -313,6 +313,100 @@ func (r *Renderer) Render(doc *transform.Document) (*platform.PlatformPayload, e
 
 ---
 
+## IR Evolution Path
+
+Important: current IR is syntax-oriented MVP IR.
+
+Current IR models:
+
+- headings
+- paragraphs
+- code blocks
+- bold/italic
+- links
+- images
+
+This is presentation-oriented.
+
+### Future: Semantic IR
+
+Future evolution:
+
+```
+Markdown
+    ↓
+Syntax AST
+    ↓
+Semantic IR
+    ↓
+Platform Adaptation
+    ↓
+Render IR
+    ↓
+Payload
+```
+
+Semantic nodes:
+
+```go
+type Section struct {
+    Title    string
+    Summary  string
+    Children []Node
+}
+
+type Callout struct {
+    Type     string  // "warning", "info", "tip"
+    Content  string
+}
+
+type CodeExample struct {
+    Language  string
+    Code      string
+    Caption   string
+}
+
+type TutorialStep struct {
+    Number    int
+    Title     string
+    Content   string
+}
+
+type ReferenceLink struct {
+    URL       string
+    Title     string
+    Context   string
+}
+
+type Summary struct {
+    Content   string
+}
+```
+
+Why semantic IR matters:
+
+- platform adaptation becomes semantic
+- AI transformation becomes possible
+- content reuse across platforms
+- better validation
+
+### Current vs Future
+
+| Aspect | Current (MVP) | Future |
+|--------|---------------|--------|
+| IR type | Syntax nodes | Semantic nodes |
+| Rendering | Format conversion | Content adaptation |
+| AI integration | Difficult | Natural |
+| Platform adaptation | Visual only | Semantic + visual |
+
+Document this evolution explicitly.
+
+Do NOT overbuild now.
+
+But design for this path.
+
+---
+
 ## Uploader Separation
 
 Uploader handles asset uploads:

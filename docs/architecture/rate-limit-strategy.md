@@ -57,20 +57,34 @@ Without rate limiting:
 type RateLimit struct {
     Platform    string
     AccountID   string
+    Operation   string
     MaxRequests int
     Window      time.Duration
 }
 ```
 
+Operations:
+
+- publish: creating posts
+- upload: uploading assets
+- delete: deleting posts
+- read: reading data
+
 ---
 
 ## Platform Rate Limits
 
-| Platform | Publish Limit | API Limit | Window |
-|----------|--------------|-----------|--------|
-| Zhihu | 10/hour | 100/hour | 1 hour |
-| Bilibili | 5/hour | 30/hour | 1 hour |
-| Weibo | 30/hour | 200/hour | 1 hour |
+| Platform | Operation | Limit | Window |
+|----------|-----------|-------|--------|
+| Zhihu | publish | 10/hour | 1 hour |
+| Zhihu | upload | 50/hour | 1 hour |
+| Zhihu | read | 100/hour | 1 hour |
+| Bilibili | publish | 5/hour | 1 hour |
+| Bilibili | upload | 20/hour | 1 hour |
+| Bilibili | read | 30/hour | 1 hour |
+| Weibo | publish | 30/hour | 1 hour |
+| Weibo | upload | 100/hour | 1 hour |
+| Weibo | read | 200/hour | 1 hour |
 
 ---
 
@@ -99,9 +113,18 @@ type Reservation struct {
 
 ---
 
-## Implementation: Token Bucket
+## Implementation: Fixed Window Counter
 
-Using Redis-based token bucket.
+Using Redis-based fixed window counter.
+
+Note: this is NOT token bucket. It is fixed window counter.
+
+Difference:
+
+- token bucket: smooth refill, allows bursts
+- fixed window: resets at window boundary, simpler
+
+For MVP: fixed window is sufficient.
 
 ```go
 type RedisRateLimiter struct {
@@ -115,12 +138,11 @@ func (l *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error) 
         return true, nil
     }
 
-    // Lua script for atomic token bucket
+    // Lua script for atomic fixed window counter
     script := redis.NewScript(`
         local key = KEYS[1]
         local max = tonumber(ARGV[1])
         local window = tonumber(ARGV[2])
-        local now = tonumber(ARGV[3])
 
         local current = redis.call('GET', key)
         if current == false then
@@ -140,7 +162,6 @@ func (l *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error) 
         fmt.Sprintf("rate:%s", key),
         limit.MaxRequests,
         int(limit.Window.Seconds()),
-        time.Now().Unix(),
     }).Int()
 
     if err != nil {
@@ -155,29 +176,38 @@ func (l *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error) 
 
 ## Rate Limit Keys
 
-### Per Platform
+### Key Format
 
 ```
-rate:platform:{platform_name}
+rate:{platform}:{account}:{operation}
 ```
 
-Example: `rate:platform:zhihu`
+Examples:
 
-### Per Account
+- `rate:zhihu:user123:publish`
+- `rate:zhihu:user123:upload`
+- `rate:bilibili:user456:publish`
+
+### Why Include Operation
+
+Upload limits and publish limits may differ.
+
+Example:
+
+- publish: 10/hour
+- upload: 50/hour
+
+Separate keys prevent interference.
+
+### Key Hierarchy
+
+For flexible limiting:
 
 ```
-rate:account:{account_id}
+rate:{platform}:{account}:{operation}  # most specific
+rate:{platform}:{account}              # per account
+rate:{platform}                        # per platform
 ```
-
-Example: `rate:account:user123`
-
-### Per Platform-Account
-
-```
-rate:{platform_name}:{account_id}
-```
-
-Example: `rate:zhihu:user123`
 
 ---
 
@@ -213,18 +243,27 @@ func calculateDelay(reservation *Reservation) time.Duration {
 ### Rate Limit Middleware
 
 ```go
-func RateLimitMiddleware(limiter RateLimiter) asynq.MiddlewareFunc {
+func RateLimitMiddleware(limiter RateLimiter, client *asynq.Client) asynq.MiddlewareFunc {
     return func(ctx context.Context, t *asynq.Task, h asynq.Handler) error {
         key := extractRateLimitKey(t)
 
-        allowed, err := limiter.Allow(ctx, key)
+        reservation, err := limiter.Reserve(ctx, key)
         if err != nil {
             return err
         }
 
-        if !allowed {
-            // Re-enqueue with delay
-            return asynq.SkipRetry
+        if !reservation.Allowed {
+            // Re-enqueue with delay, preserve retry count
+            delay := calculateDelay(reservation)
+            _, err := client.EnqueueContext(ctx, t,
+                asynq.ProcessIn(delay),
+                asynq.Retention(24*time.Hour),
+            )
+            if err != nil {
+                return fmt.Errorf("re-enqueue rate limited task: %w", err)
+            }
+            // Return nil to indicate task was handled (re-enqueued)
+            return nil
         }
 
         return h.ProcessTask(ctx, t)
@@ -232,12 +271,20 @@ func RateLimitMiddleware(limiter RateLimiter) asynq.MiddlewareFunc {
 }
 ```
 
+Important: do NOT use asynq.SkipRetry for rate limiting.
+
+SkipRetry removes task from retry lifecycle.
+
+Rate limiting is NOT task failure.
+
+Correct behavior: re-enqueue with delay, preserve retry count.
+
 ### Task Options
 
 ```go
 asynq.NewTask(TypePublishContent, payload,
     asynq.MaxRetry(3),
-    asynq.RateLimit(10, time.Hour),  // 10 per hour
+    asynq.Retention(24*time.Hour),
 )
 ```
 
@@ -335,6 +382,99 @@ When rate limit exceeded:
 2. re-enqueue task with delay
 3. do not fail task
 4. update metrics
+
+---
+
+## Concurrency Control
+
+Rate limiting alone is insufficient.
+
+Problem:
+
+```
+100 workers simultaneously
+all pass rate check
+API explodes
+```
+
+Solution: concurrency limits per platform.
+
+### Configuration
+
+```yaml
+platform_workers:
+  zhihu: 2
+  bilibili: 1
+  weibo: 3
+```
+
+### Implementation
+
+Use semaphore per platform:
+
+```go
+type PlatformConcurrencyLimiter struct {
+    semaphores map[string]chan struct{}
+}
+
+func NewPlatformConcurrencyLimiter(limits map[string]int) *PlatformConcurrencyLimiter {
+    semaphores := make(map[string]chan struct{})
+    for platform, limit := range limits {
+        semaphores[platform] = make(chan struct{}, limit)
+    }
+    return &PlatformConcurrencyLimiter{semaphores: semaphores}
+}
+
+func (l *PlatformConcurrencyLimiter) Acquire(ctx context.Context, platform string) error {
+    sem, ok := l.semaphores[platform]
+    if !ok {
+        return nil
+    }
+
+    select {
+    case sem <- struct{}{}:
+        return nil
+    case <-ctx.Done():
+        return ctx.Err()
+    }
+}
+
+func (l *PlatformConcurrencyLimiter) Release(platform string) {
+    sem, ok := l.semaphores[platform]
+    if !ok {
+        return
+    }
+    <-sem
+}
+```
+
+### Integration
+
+```go
+func (h *PublishHandler) ProcessTask(ctx context.Context, t *asynq.Task) error {
+    payload := extractPayload(t)
+
+    // Acquire concurrency slot
+    if err := h.concurrency.Acquire(ctx, payload.Platform); err != nil {
+        return err
+    }
+    defer h.concurrency.Release(payload.Platform)
+
+    // Check rate limit
+    allowed, err := h.rateLimiter.Allow(ctx, extractRateLimitKey(t))
+    if err != nil {
+        return err
+    }
+    if !allowed {
+        return requeueWithDelay(ctx, h.client, t)
+    }
+
+    // Process task
+    return h.doPublish(ctx, t)
+}
+```
+
+Both rate limits AND concurrency limits are needed.
 
 ---
 

@@ -196,15 +196,42 @@ Cookie refresh requires:
 
 MVP: manual refresh.
 
+### Cookie Validity
+
+Important: cookie expiration timestamps are unreliable.
+
+Many real cookies:
+
+- have zero expiration
+- are session cookies
+- rely on server invalidation
+
+Correct model:
+
+```
+cookie validity = determined by API response
+```
+
+Not local expiration timestamps.
+
+Validation approach:
+
+1. use cookies for API call
+2. if API returns auth error → cookies invalid
+3. if API succeeds → cookies valid
+4. cache validity result with short TTL
+
 ### Implementation
 
 ```go
 type CookieProvider struct {
-    name     string
-    config   CookieConfig
-    cookies  []*http.Cookie
-    mu       sync.RWMutex
-    store    CookieStore
+    name        string
+    config      CookieConfig
+    cookies     []*http.Cookie
+    mu          sync.RWMutex
+    store       CookieStore
+    lastCheck   time.Time
+    lastValid   bool
 }
 
 func (p *CookieProvider) Authenticate(ctx context.Context) (*Credentials, error) {
@@ -221,16 +248,29 @@ func (p *CookieProvider) Authenticate(ctx context.Context) (*Credentials, error)
     }, nil
 }
 
-func (p *CookieProvider) IsExpired() bool {
-    p.mu.RLock()
-    defer p.mu.RUnlock()
+func (p *CookieProvider) Validate(ctx context.Context) error {
+    p.mu.Lock()
+    defer p.mu.Unlock()
 
-    // Check if any cookie is expired
-    for _, c := range p.cookies {
-        if c.Expires.Before(time.Now()) {
-            return true
+    // Cache validity for 5 minutes
+    if time.Since(p.lastCheck) < 5*time.Minute {
+        if p.lastValid {
+            return nil
         }
+        return ErrInvalidCredentials
     }
+
+    // Test cookies by making lightweight API call
+    err := p.testCookies(ctx)
+    p.lastCheck = time.Now()
+    p.lastValid = err == nil
+
+    return err
+}
+
+func (p *CookieProvider) IsExpired() bool {
+    // Do NOT rely on cookie expiration timestamps
+    // Use Validate() instead
     return false
 }
 ```
@@ -268,26 +308,52 @@ type CookieStore interface {
 ```sql
 CREATE TABLE platform_credentials (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    platform VARCHAR(50) NOT NULL UNIQUE,
+    account_id UUID NOT NULL,
+    platform VARCHAR(50) NOT NULL,
     credential_type VARCHAR(20) NOT NULL,
     encrypted_data BYTEA NOT NULL,
     expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_platform_credentials_account_platform UNIQUE (account_id, platform)
 );
 
+CREATE INDEX idx_platform_credentials_account ON platform_credentials(account_id);
 CREATE INDEX idx_platform_credentials_platform ON platform_credentials(platform);
 ```
 
+Why account_id:
+
+- supports multiple accounts per platform (future)
+- supports team accounts (future)
+- supports organization accounts (future)
+- even if MVP only has one account per user
+
+Do NOT bake incorrect cardinality into schema.
+
 ### Encryption
 
-Credentials encrypted at rest using AES-256.
+Credentials encrypted at rest using AES-256-GCM.
+
+Encryption details:
+
+- algorithm: AES-256-GCM
+- nonce: random 12 bytes per encryption operation
+- key: 256-bit key from environment
+- authentication: GCM provides authenticated encryption
 
 Encryption key from environment:
 
 ```env
-CREDENTIAL_ENCRYPTION_KEY=base64-encoded-key
+CREDENTIAL_ENCRYPTION_KEY=base64-encoded-32-bytes
 ```
+
+Key rotation strategy:
+
+- store key version with encrypted data
+- support multiple active keys
+- re-encrypt on rotation
 
 ---
 
@@ -310,6 +376,40 @@ func (r *AuthRegistry) Get(platform string) (AuthProvider, error) {
     return p, nil
 }
 ```
+
+---
+
+## Credential Ownership Boundary
+
+Important: who owns credentials?
+
+Workers should NEVER directly access credential storage.
+
+Correct ownership chain:
+
+```
+workflow
+    ↓
+platform adapter
+    ↓
+auth provider
+    ↓
+credential store
+```
+
+Flow:
+
+1. workflow triggers publish
+2. platform adapter requests credentials
+3. auth provider retrieves from store
+4. auth provider returns to adapter
+5. adapter uses credentials for API call
+
+Workers do NOT:
+
+- know about credential storage
+- access credential store directly
+- manage token lifecycle
 
 ---
 

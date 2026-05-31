@@ -84,8 +84,22 @@ No local storage yet
 
 ### During Publishing
 
+Important: asset upload must happen BEFORE rendering.
+
+Why:
+
+- uploaded image dimensions may affect layout
+- platform media IDs must be embedded in content
+- transformed URLs must be available for renderer
+
+Correct flow:
+
 ```
 Parse content for asset references
+    ↓
+Collect all asset references
+    ↓
+Deduplicate assets (by URL)
     ↓
 Download assets to local storage
     ↓
@@ -93,9 +107,11 @@ Upload assets to target platform
     ↓
 Get platform asset IDs
     ↓
-Rewrite content references
+Inject platform asset refs into document
     ↓
-Publish with rewritten content
+Render document (with platform asset refs)
+    ↓
+Publish rendered payload
 ```
 
 ---
@@ -198,12 +214,65 @@ Returns list of assets needed for publish.
 
 ---
 
+## Asset Deduplication
+
+Important: same image may appear multiple times in content.
+
+Example:
+
+```markdown
+![Logo](https://example.com/logo.png)
+![Logo](https://example.com/logo.png)
+```
+
+Without deduplication: upload twice, waste bandwidth.
+
+### Deduplication Strategy
+
+```go
+func deduplicateAssets(assets []AssetReference) []AssetReference {
+    seen := make(map[string]bool)
+    result := []AssetReference{}
+
+    for _, asset := range assets {
+        if !seen[asset.OriginalURL] {
+            seen[asset.OriginalURL] = true
+            result = append(result, asset)
+        }
+    }
+
+    return result
+}
+```
+
+### Mapping After Upload
+
+After upload, map original URLs to platform IDs:
+
+```go
+type AssetMapping struct {
+    OriginalURL string
+    PlatformID  string
+    LocalPath   string
+}
+```
+
+Document nodes reference mapping by original URL.
+
+---
+
 ## Asset Processing Pipeline
 
+### Correct Order
+
 ```
+Parse document
+    ↓
 Collect asset references from document
     ↓
-For each asset:
+Deduplicate assets by URL
+    ↓
+For each unique asset:
     Download from source URL
     Validate file type and size
     Store locally
@@ -212,10 +281,22 @@ For each platform:
     Upload assets via platform uploader
     Get platform asset IDs
     ↓
-Rewrite document references with platform IDs
+Inject platform asset refs into document
     ↓
-Pass rewritten document to renderer
+Pass document to renderer
+    ↓
+Renderer uses platform asset refs
+    ↓
+Cleanup temporary files
 ```
+
+### Why This Order
+
+1. Collect before download: avoid unnecessary downloads if no assets
+2. Deduplicate before download: avoid downloading same asset twice
+3. Upload before render: renderer needs platform asset IDs
+4. Inject before render: document must contain platform refs
+5. Cleanup after render: files only needed during publish
 
 ---
 
