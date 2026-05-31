@@ -453,3 +453,6 @@ Not included:
 - [publish-state-machine.md](publish-state-machine.md)
 - [asset-pipeline.md](asset-pipeline.md)
 - [platform-capability-matrix.md](platform-capability-matrix.md)
+- [auth-provider-architecture.md](auth-provider-architecture.md)
+- [rate-limit-strategy.md](rate-limit-strategy.md)
+- [platform-abstraction.md](platform-abstraction.md)
