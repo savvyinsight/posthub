@@ -25,6 +25,26 @@ It allows users to:
 
 ---
 
+## Core Systems
+
+PostHub consists of three core systems:
+
+```
+Canonical Content System
+        +
+Publish Orchestration System
+        +
+Platform Adapter System
+```
+
+This is NOT merely:
+
+```
+API + Queue + Worker
+```
+
+---
+
 ## Architecture
 
 ```
@@ -33,27 +53,126 @@ It allows users to:
 └──────┬──────┘
        │
        ▼
-┌─────────────┐
-│  API Server │
-└──────┬──────┘
-       │
-       ├──────────────────┐
-       ▼                  ▼
-┌─────────────┐    ┌─────────────┐
-│  PostgreSQL │    │    Redis    │
-└─────────────┘    └──────┬──────┘
-                          │
-                          ▼
-                   ┌─────────────┐
-                   │   Workers   │
-                   └──────┬──────┘
-                          │
-       ┌──────────────────┼──────────────────┐
-       ▼                  ▼                  ▼
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Zhihu     │    │  Bilibili   │    │   Other     │
-└─────────────┘    └─────────────┘    └─────────────┘
+┌─────────────────────────────────────────────────┐
+│                  API Server                      │
+│         (chi router, slog logging)               │
+└──────┬──────────────────────────────────┬───────┘
+       │                                  │
+       ▼                                  ▼
+┌─────────────────┐              ┌─────────────────┐
+│  Content Domain │              │ Publish Domain  │
+│  (CRUD, state)  │              │ (orchestration) │
+└────────┬────────┘              └────────┬────────┘
+         │                                │
+         ▼                                ▼
+┌─────────────────┐              ┌─────────────────┐
+│    PostgreSQL   │              │  Asynq (Redis)  │
+│   (pgx + sqlc)  │              │  (task queue)   │
+└─────────────────┘              └────────┬────────┘
+                                          │
+                                          ▼
+                                 ┌─────────────────┐
+                                 │  Worker Pool    │
+                                 │  (Asynq worker) │
+                                 └────────┬────────┘
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+                    ▼                     ▼                     ▼
+           ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+           │  Zhihu      │      │  Bilibili   │      │   Weibo     │
+           │  Adapter    │      │  Adapter    │      │  Adapter    │
+           └─────────────┘      └─────────────┘      └─────────────┘
 ```
+
+---
+
+## Domain Boundaries
+
+### Content Domain
+
+Responsibilities:
+
+- content CRUD operations
+- content state management
+- content validation
+
+Location: `internal/domain/content/`
+
+---
+
+### Publishing Domain
+
+Responsibilities:
+
+- publish orchestration
+- task management
+- state machine execution
+- result tracking
+
+Location: `internal/domain/publishing/`
+
+---
+
+### Platform Adapters
+
+Responsibilities:
+
+- platform authentication
+- content transformation
+- asset upload
+- API communication
+
+Location: `internal/platforms/`
+
+---
+
+### Workflow Engine
+
+Responsibilities:
+
+- task scheduling
+- retry logic
+- error classification
+- dead letter handling
+
+Location: `internal/workflow/`
+
+---
+
+### Storage Layer
+
+Responsibilities:
+
+- database access
+- query execution
+- transaction management
+
+Location: `internal/storage/`
+
+---
+
+### Queue Layer
+
+Responsibilities:
+
+- task enqueue
+- task processing
+- Asynq integration
+
+Location: `internal/queue/`
+
+---
+
+### API Layer
+
+Responsibilities:
+
+- HTTP routing
+- request parsing
+- response formatting
+- middleware
+
+Location: `internal/api/`
 
 ---
 
@@ -66,10 +185,10 @@ Responsibilities:
 - accept HTTP requests
 - validate input
 - manage content lifecycle
-- enqueue publish jobs
+- enqueue publish tasks
 - return responses
 
-Technology: Go net/http
+Technology: chi router
 
 ---
 
@@ -78,30 +197,37 @@ Technology: Go net/http
 Responsibilities:
 
 - store canonical content
-- store publish jobs
-- store publish results
+- store publish tasks
+- store publish attempts
+- store platform posts
 
 Why PostgreSQL:
 
-- JSON support
+- JSON support for metadata
 - transactional guarantees
 - mature ecosystem
 
+Technology: pgx driver + sqlc
+
 ---
 
-### Redis
+### Redis + Asynq
 
 Responsibilities:
 
-- job queue
-- idempotency set
-- caching (future)
+- task queue (via Asynq)
+- retry management (built-in)
+- dead letter queue (built-in)
+- scheduling (future)
 
-Why Redis:
+Why Asynq:
 
-- fast message broker
-- simple queue operations
-- built-in TTL
+- Go-native
+- Redis-based
+- production-tested
+- retries built-in
+- DLQ built-in
+- no custom queue code needed
 
 ---
 
@@ -109,27 +235,40 @@ Why Redis:
 
 Responsibilities:
 
-- consume jobs from queue
+- process tasks from Asynq queue
 - load content from database
-- transform content for platform
-- publish to platform
+- transform content via pipeline
+- publish via platform adapter
 - store results
-- handle retries
+- handle retries (via Asynq)
 
-Technology: Go goroutines
+Technology: Asynq worker
 
 ---
 
-### Platform Publishers
+### Platform Adapters
 
 Responsibilities:
 
 - authenticate with platform
-- validate content for platform
+- transform content via IR
+- upload assets
 - call platform API
 - parse response
 
-Each platform is a separate module.
+Each platform is a separate adapter implementing the Publisher interface.
+
+---
+
+### Transformation Pipeline
+
+Responsibilities:
+
+- parse markdown to AST
+- convert AST to IR (Intermediate Representation)
+- render IR to platform-specific payload
+
+Technology: goldmark parser
 
 ---
 
@@ -138,34 +277,38 @@ Each platform is a separate module.
 ### Content Creation
 
 ```
-Client → API → PostgreSQL
+Client → API → Content Domain → PostgreSQL
 ```
 
 ### Publishing
 
 ```
-Client → API → Redis → Worker → PostgreSQL → Platform
+Client → API → Publish Domain → Asynq → Worker → Asset Pipeline → Platform Adapter → Platform
+                                                → PostgreSQL (store result)
 ```
 
 ### Status Check
 
 ```
-Client → API → PostgreSQL
+Client → API → Publish Domain → PostgreSQL
 ```
 
 ---
 
 ## Technology Stack
 
-| Component | Technology |
-|-----------|------------|
-| Language | Go |
-| HTTP | net/http |
-| Database | PostgreSQL |
-| Queue | Redis |
-| Migrations | golang-migrate |
-| Logging | slog |
-| Config | env vars |
+| Component | Technology | Why |
+|-----------|------------|-----|
+| Language | Go | performance, simplicity |
+| HTTP Router | chi | lightweight, idiomatic |
+| Database | PostgreSQL | reliability, JSON support |
+| DB Driver | pgx | performance, features |
+| DB Queries | sqlc | type-safe, no ORM |
+| Queue | Asynq | production-tested, built-in retries |
+| Migrations | golang-migrate | simple, versioned |
+| Logging | slog | structured, stdlib |
+| Config | env vars | 12-factor app |
+| Markdown | goldmark | extensible, CommonMark |
 
 ---
 
@@ -174,17 +317,24 @@ Client → API → PostgreSQL
 ```
 posthub/
     cmd/
-        api/          # API server entry point
-        worker/       # worker entry point
+        api/                    # API server entry point
+        worker/                 # worker entry point
     internal/
-        api/          # HTTP handlers
-        content/      # content domain
-        publish/      # publish domain
-        queue/        # queue operations
-        platform/     # platform publishers
-    migrations/       # database migrations
-    docs/             # documentation
-    config/           # configuration
+        domain/
+            content/            # content aggregate
+            publishing/         # publish orchestration
+        platforms/
+            zhihu/              # Zhihu adapter
+            bilibili/           # Bilibili adapter
+            weibo/              # Weibo adapter
+        workflow/               # state machine, retry logic
+        storage/                # database access layer
+        queue/                  # Asynq integration
+        api/                    # HTTP handlers, routes
+        transform/              # IR, parser, renderers
+    migrations/                 # database migrations
+    docs/                       # documentation
+    config/                     # configuration
 ```
 
 ---
@@ -223,12 +373,13 @@ go run cmd/worker/main.go
 
 ### Production
 
-Single binary deployment.
+Two binaries: api and worker.
 
 Build:
 
 ```bash
-go build -o posthub ./cmd/api
+go build -o posthub-api ./cmd/api
+go build -o posthub-worker ./cmd/worker
 ```
 
 ---
@@ -285,6 +436,7 @@ Not included:
 - webhooks
 - scheduling
 - AI transformation
+- permanent asset storage
 
 ---
 
@@ -297,3 +449,7 @@ Not included:
 - [database-schema.md](database-schema.md)
 - [api-design.md](api-design.md)
 - [error-handling.md](error-handling.md)
+- [transformation-pipeline.md](transformation-pipeline.md)
+- [publish-state-machine.md](publish-state-machine.md)
+- [asset-pipeline.md](asset-pipeline.md)
+- [platform-capability-matrix.md](platform-capability-matrix.md)

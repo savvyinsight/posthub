@@ -2,269 +2,291 @@
 
 ## Goal
 
-Define the job queue system for asynchronous publish processing.
+Define the task queue system using Asynq.
 
 This document is the source of truth for:
 
-- queue architecture
-- job lifecycle
+- Asynq integration
+- task lifecycle
 - worker processing
 - failure handling
 
 ---
 
-## Queue Architecture
+## Why Asynq
+
+Do not build custom queue infrastructure.
+
+Asynq provides:
+
+- Go-native
+- Redis-based
+- built-in retries
+- built-in dead letter queue
+- scheduling support
+- production-tested
+
+---
+
+## Architecture
 
 ```
 API Server
     ↓
-Redis Queue
+Asynq Client
     ↓
-Worker Pool
+Redis
     ↓
-Platform Publishers
+Asynq Worker
+    ↓
+Task Handler
+    ↓
+Platform Publisher
 ```
-
-Components:
-
-- **Redis**: message broker
-- **API Server**: job producer
-- **Worker Pool**: job consumers
-- **Platform Publishers**: job executors
 
 ---
 
-## Job Model
+## Task Types
+
+### Publish Task
 
 ```go
-type PublishJob struct {
-    ID          string    `json:"id"`
-    ContentID   string    `json:"content_id"`
-    Platform    string    `json:"platform"`
-    Status      string    `json:"status"`
-    RetryCount  int       `json:"retry_count"`
-    MaxRetries  int       `json:"max_retries"`
-    Error       string    `json:"error,omitempty"`
-    CreatedAt   time.Time `json:"created_at"`
-    UpdatedAt   time.Time `json:"updated_at"`
+const TypePublishContent = "publish:content"
+
+type PublishTaskPayload struct {
+    TaskID    string `json:"task_id"`
+    ContentID string `json:"content_id"`
+    Platform  string `json:"platform"`
 }
 ```
 
 ---
 
-## Job States
+## Task Lifecycle
 
 ```
-queued
+Enqueue
     ↓
-processing
+Pending (in Redis)
     ↓
-success
-    OR
-failed → retrying → processing
-    OR
-failed → dead
+Processing (worker picked up)
+    ↓
+Success / Retry / Dead
 ```
 
-### State Definitions
+### States
 
-- **queued**: job is in Redis queue
-- **processing**: worker is executing job
-- **success**: job completed successfully
-- **failed**: job failed permanently
-- **retrying**: job will be retried
-- **dead**: job exceeded max retries
+- pending: task in queue
+- processing: worker executing
+- succeeded: task completed
+- retrying: will retry after delay
+- dead: max retries exceeded
 
 ---
 
-## Queue Operations
-
-### Enqueue Job
+## Enqueue Task
 
 ```go
-func EnqueueJob(ctx context.Context, job *PublishJob) error {
-    data, _ := json.Marshal(job)
-    return redis.LPush(ctx, "publish:queue", data).Err()
-}
-```
-
-### Dequeue Job
-
-```go
-func DequeueJob(ctx context.Context) (*PublishJob, error) {
-    result, err := redis.BRPop(ctx, 0, "publish:queue").Result()
+func (q *Queue) EnqueuePublishTask(ctx context.Context, task *PublishTask) error {
+    payload, err := json.Marshal(PublishTaskPayload{
+        TaskID:    task.ID,
+        ContentID: task.ContentID,
+        Platform:  task.Platform,
+    })
     if err != nil {
-        return nil, err
+        return err
     }
-    var job PublishJob
-    json.Unmarshal([]byte(result[1]), &job)
-    return &job, nil
+
+    _, err = q.client.EnqueueContext(ctx,
+        asynq.NewTask(TypePublishContent, payload),
+        asynq.MaxRetry(task.MaxRetries),
+        asynq.Queue("publish"),
+    )
+    return err
 }
 ```
 
-### Queue Name
-
-- main queue: `publish:queue`
-- dead letter queue: `publish:dead`
-
 ---
 
-## Worker Pool
-
-### Worker Lifecycle
-
-```
-Start
-    ↓
-Dequeue Job
-    ↓
-Process Job
-    ↓
-Update Status
-    ↓
-Loop
-```
-
-### Worker Configuration
+## Task Handler
 
 ```go
-type WorkerConfig struct {
-    Concurrency    int
-    MaxRetries     int
-    RetryDelay     time.Duration
-    ShutdownTimeout time.Duration
+type PublishHandler struct {
+    store     *storage.Queries
+    registry  *platform.Registry
+    transform *transform.Pipeline
+}
+
+func (h *PublishHandler) ProcessTask(ctx context.Context, t *asynq.Task) error {
+    var payload PublishTaskPayload
+    if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+        return fmt.Errorf("unmarshal payload: %w", err)
+    }
+
+    // Load content
+    content, err := h.store.GetContent(ctx, payload.ContentID)
+    if err != nil {
+        return fmt.Errorf("get content: %w", err)
+    }
+
+    // Get publisher
+    publisher, err := h.registry.Get(payload.Platform)
+    if err != nil {
+        return fmt.Errorf("get publisher: %w", err)
+    }
+
+    // Parse and transform
+    doc, err := h.transform.Parse(content.Body)
+    if err != nil {
+        return fmt.Errorf("parse content: %w", err)
+    }
+
+    payload_doc, err := publisher.Renderer().Render(doc)
+    if err != nil {
+        return fmt.Errorf("render content: %w", err)
+    }
+
+    // Upload assets if needed
+    if err := h.processAssets(ctx, payload_doc, publisher); err != nil {
+        return fmt.Errorf("process assets: %w", err)
+    }
+
+    // Publish
+    result, err := publisher.Publish(ctx, payload_doc)
+    if err != nil {
+        return fmt.Errorf("publish: %w", err)
+    }
+
+    // Store result
+    if err := h.storeResult(ctx, payload.TaskID, result); err != nil {
+        return fmt.Errorf("store result: %w", err)
+    }
+
+    return nil
 }
 ```
 
-### Concurrency
-
-- default: 5 workers
-- configurable via environment
-- each worker runs in separate goroutine
-
 ---
 
-## Job Processing
-
-### Processing Flow
-
-```
-Dequeue
-    ↓
-Load Content from DB
-    ↓
-Get Publisher from Registry
-    ↓
-Publisher.Authenticate()
-    ↓
-Publisher.Validate()
-    ↓
-Publisher.Publish()
-    ↓
-Store Result
-    ↓
-Update Job Status
-```
-
-### Processing Timeout
-
-- default: 30 seconds per job
-- configurable per platform
-- timeout = permanent failure
-
----
-
-## Retry Logic
-
-### Retryable Failures
-
-- network timeout
-- connection refused
-- HTTP 429 (rate limit)
-- HTTP 5xx (server error)
-
-### Permanent Failures
-
-- HTTP 4xx (client error)
-- validation failure
-- authentication failure
-
-### Retry Implementation
+## Worker Setup
 
 ```go
-func (w *Worker) processWithRetry(job *PublishJob) error {
-    for i := 0; i <= job.MaxRetries; i++ {
-        err := w.process(job)
-        if err == nil {
-            return nil
-        }
-        if !isRetryable(err) {
-            return err
-        }
-        job.RetryCount = i + 1
-        delay := calculateBackoff(i)
-        time.Sleep(delay)
+func NewWorker(cfg *config.Config, handler *PublishHandler) *asynq.Server {
+    srv := asynq.NewServer(
+        asynq.RedisClientOpt{Addr: cfg.RedisURL},
+        asynq.Config{
+            Concurrency: cfg.WorkerConcurrency,
+            Queues: map[string]int{
+                "publish": 6,
+                "default": 4,
+            },
+        },
+    )
+    return srv
+}
+
+func main() {
+    mux := asynq.NewServeMux()
+    mux.HandleFunc(TypePublishContent, handler.ProcessTask)
+
+    if err := srv.Run(mux); err != nil {
+        log.Fatal(err)
     }
-    return ErrMaxRetriesExceeded
 }
 ```
 
-### Backoff Strategy
+---
 
-```
-delay = baseDelay * 2^retryCount
+## Retry Behavior
+
+### Asynq Built-in Retries
+
+Asynq handles:
+
+- automatic retry on error
+- exponential backoff
+- max retry limit
+- dead letter queue
+
+### Configuration
+
+```go
+asynq.NewTask(TypePublishContent, payload,
+    asynq.MaxRetry(3),
+    asynq.Timeout(30*time.Second),
+    asynq.Deadline(time.Now().Add(5*time.Minute)),
+)
 ```
 
-- base delay: 1 second
-- max delay: 5 minutes
-- jitter: +/- 10%
+### Error Classification
+
+```go
+func (h *PublishHandler) ProcessTask(ctx context.Context, t *asynq.Task) error {
+    err := h.doPublish(ctx, t)
+    if err != nil {
+        // Permanent error: don't retry
+        if isPermanentError(err) {
+            return fmt.Errorf("permanent: %w", asynq.SkipRetry)
+        }
+        // Retryable error: Asynq will retry
+        return err
+    }
+    return nil
+}
+```
 
 ---
 
 ## Dead Letter Queue
 
-### When Job Moves to DLQ
+Asynq automatically moves failed tasks to DLQ after max retries.
 
-- max retries exceeded
-- permanent failure after retry
+### Inspect Dead Tasks
 
-### DLQ Operations
+```go
+func (q *Queue) ListDeadTasks(ctx context) ([]*asynq.TaskInfo, error) {
+    inspector := asynq.NewInspector(asynq.RedisClientOpt{Addr: q.redisURL})
+    return inspector.ListDeadTasks("publish")
+}
+```
 
-- inspect failed jobs
-- manually retry jobs
-- archive old jobs
+### Retry Dead Task
 
-### DLQ Retention
-
-- default: 7 days
-- configurable
+```go
+func (q *Queue) RetryDeadTask(ctx context, taskID string) error {
+    inspector := asynq.NewInspector(asynq.RedisClientOpt{Addr: q.redisURL})
+    return inspector.RunTask("publish", taskID)
+}
+```
 
 ---
 
-## Idempotency
+## Queue Configuration
 
-### Duplicate Prevention
+### Queues
 
-Each job has unique ID.
+| Queue | Priority | Description |
+|-------|----------|-------------|
+| publish | high | publish tasks |
+| default | low | other tasks |
 
-Before processing:
+### Concurrency
 
-```
-Check if job_id exists in processed set
-    ↓
-If exists: skip
-If not exists: process and add to set
-```
-
-### Processed Set
-
-- Redis set: `publish:processed`
-- TTL: 24 hours
-- auto-cleanup
+- total: 10 workers (configurable)
+- publish queue: 6 workers
+- default queue: 4 workers
 
 ---
 
 ## Monitoring
+
+### Asynq Built-in
+
+Asynq provides:
+
+- web UI for monitoring
+- CLI for inspection
+- metrics export
 
 ### Metrics to Track
 
@@ -272,13 +294,13 @@ If not exists: process and add to set
 - processing time
 - success rate
 - failure rate
-- retry rate
+- dead task count
 
 ### Logging
 
-Each job logs:
+Each task logs:
 
-- job_id
+- task_id
 - content_id
 - platform
 - status transitions
@@ -289,24 +311,23 @@ Each job logs:
 
 ## Graceful Shutdown
 
-### Shutdown Flow
+Asynq handles graceful shutdown:
 
-```
-Receive SIGTERM
-    ↓
-Stop accepting new jobs
-    ↓
-Wait for current jobs to complete
-    ↓
-Timeout: force stop
-    ↓
-Exit
+```go
+srv := asynq.NewServer(...)
+
+// Asynq waits for active tasks to complete
+srv.Shutdown()
 ```
 
-### Shutdown Timeout
+---
 
-- default: 30 seconds
-- configurable
+## Configuration
+
+```env
+REDIS_URL=redis://localhost:6379
+WORKER_CONCURRENCY=10
+```
 
 ---
 
@@ -314,8 +335,8 @@ Exit
 
 Not included:
 
-- priority queues
-- delayed jobs
-- job scheduling
-- queue sharding
-- distributed workers
+- priority queues (beyond basic)
+- delayed tasks
+- task scheduling
+- distributed workers across machines
+- task chaining
