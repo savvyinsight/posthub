@@ -1,7 +1,5 @@
-# syntax=docker/dockerfile:1
-
 # ---- Build stage ----
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
