@@ -3,6 +3,11 @@
 # ---- Build stage ----
 FROM golang:1.23-alpine AS builder
 
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
+ENV HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTPS_PROXY} GOPROXY=${GOPROXY}
+
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src

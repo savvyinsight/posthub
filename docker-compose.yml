@@ -31,6 +31,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        GOPROXY: ${GOPROXY:-}
     ports:
       - "8080:8080"
     environment:
@@ -54,6 +58,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        GOPROXY: ${GOPROXY:-}
     entrypoint: ["posthub-worker"]
     environment:
       DATABASE_URL: postgres://posthub:posthub@postgres:5432/posthub?sslmode=disable
